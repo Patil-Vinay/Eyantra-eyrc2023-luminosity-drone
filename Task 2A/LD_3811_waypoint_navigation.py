@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
 
+# Team ID:     3811
+# Theme:       Luminosity Drone
+# Filename:    LD_3811_waypoint_navigation.py
+
+# Flies the Swift drone through a fixed list of whycon waypoints.
+# A waypoint counts as reached when x, y and z are all within 0.2.
+
 import rospy
 from swift_msgs.msg import *
 from geometry_msgs.msg import PoseArray
@@ -23,6 +30,7 @@ class SwiftDrone:
             [0, 0, 19]
         ]
         self.current_setpoint = 0
+        self.finished = False
 
         self.cmd = swift_msgs()
         self.cmd.rcRoll = 1500
@@ -34,8 +42,9 @@ class SwiftDrone:
         self.cmd.rcAUX3 = 1500
         self.cmd.rcAUX4 = 1500
 
+        # gains for [roll, pitch, throttle]
         self.Kp = [93,87.78,90.18]
-        self.Ki = [0.00176,0.00088,0.008]	
+        self.Ki = [0.00176,0.00088,0.008]
         self.Kd = [753.3,818,780.3]
 
         self.error = [0, 0, 0]
@@ -77,24 +86,22 @@ class SwiftDrone:
         self.drone_position[1] = msg.poses[0].position.y
         self.drone_position[2] = msg.poses[0].position.z
 
-        if self.current_setpoint < len(self.setpoints):
+        if not self.finished:
             setpoint = self.setpoints[self.current_setpoint]
             error = [setpoint[0] - self.drone_position[0], setpoint[1] - self.drone_position[1], setpoint[2] - self.drone_position[2]]
 
             if all(abs(e) <= 0.2 for e in error):
-                # Waypoint is considered successful
-                self.current_setpoint += 1
-                if self.current_setpoint < len(self.setpoints):
-                    # Move to the next setpoint
-                    print(f"Reached setpoint {self.current_setpoint}: {setpoint}")
+                print(f"Reached setpoint {self.current_setpoint + 1}: {setpoint}")
+                # never step past the last index, pid() reads it from the main loop
+                if self.current_setpoint + 1 < len(self.setpoints):
+                    self.current_setpoint += 1
                     self.set_setpoint(self.setpoints[self.current_setpoint])
-                   
                 else:
-                    print(f"Reached setpoint {self.current_setpoint}: {setpoint}")
+                    # keep hovering at the last waypoint
                     print("All waypoints reached.")
-                    self.current_setpoint = len(self.setpoints)-1
-                    self.set_setpoint(self.setpoints[-1])  # Hover at the last setpoint or perform other actions
+                    self.finished = True
 
+    # reset integral and derivative terms when the target changes
     def set_setpoint(self, setpoint):
         self.setpoints[self.current_setpoint] = setpoint
         self.sum_error = [0, 0, 0]
@@ -106,14 +113,14 @@ class SwiftDrone:
         self.Kd[2] = alt.Kd * 0.3
 
     def pitch_set_pid(self, pitch):
-        self.Kp[0] = pitch.Kp * 0.06
-        self.Ki[0] = pitch.Ki * 0.00008
-        self.Kd[0] = pitch.Kd * 0.3
+        self.Kp[1] = pitch.Kp * 0.06
+        self.Ki[1] = pitch.Ki * 0.00008
+        self.Kd[1] = pitch.Kd * 0.3
 
     def roll_set_pid(self, roll):
-        self.Kp[1] = roll.Kp * 0.06
-        self.Ki[1] = roll.Ki * 0.00008
-        self.Kd[1] = roll.Kd * 0.3
+        self.Kp[0] = roll.Kp * 0.06
+        self.Ki[0] = roll.Ki * 0.00008
+        self.Kd[0] = roll.Kd * 0.3
 
     def pid(self):
         self.error[0] = -(self.drone_position[0] - self.setpoints[self.current_setpoint][0])
@@ -158,7 +165,7 @@ class SwiftDrone:
 
 if __name__ == '__main__':
     swift_drone = SwiftDrone()
-    r = rospy.Rate(30)
+    r = rospy.Rate(30) # pid runs every 33 ms
     while not rospy.is_shutdown():
         swift_drone.pid()
         r.sleep()
