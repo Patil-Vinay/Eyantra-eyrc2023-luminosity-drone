@@ -1,65 +1,61 @@
-'''
-# Team ID:          < 3811 >
-# Theme:            < Luminosity Drone >
-# Filename:         < LD_3811_led_detection.py >
-# Functions:        < None >
-# Global variables: < None >
-'''
+# Team ID:     3811
+# Theme:       Luminosity Drone
+# Filename:    LD_3811_led_detection.py
 
-# import the necessary packages
+# Finds the bright LEDs in an image and writes their centroid and area.
+# usage: python3 LD_3811_led_detection.py [image]   (default led.jpg)
+
 from imutils import contours
 from skimage import measure
 import numpy as np
 import imutils
 import cv2
+import sys
 
-# load the image, 
-image = cv2.imread('led.jpg', 1)
+path = sys.argv[1] if len(sys.argv) > 1 else 'led.jpg'
+image = cv2.imread(path, 1)
+if image is None:
+    sys.exit("could not read " + path)
 
-# convert it to grayscale, and blur it
+# grayscale and blur so each LED becomes one smooth blob
 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 blur = cv2.GaussianBlur(gray, (11, 11), 0)
-# threshold the image to reveal light regions in the blurred image
+
+# keep only the bright regions
 thresh = cv2.threshold(blur, 200, 255, cv2.THRESH_BINARY)[1]
 
-# perform a series of erosions and dilations to remove any small blobs of noise from the thresholded image
+# erode then dilate to remove small specks of noise
 thresh = cv2.erode(thresh, None, iterations=2)
 thresh = cv2.dilate(thresh, None, iterations=4)
 
-# perform a connected component analysis on the thresholded image, then initialize a mask to store only the "large" components
+# label connected regions and keep the big ones in a mask
 labels = measure.label(thresh, connectivity=2, background=0)
 mask = np.zeros(thresh.shape, dtype="uint8")
 
-# loop over the unique components
 for label in np.unique(labels):
-	# if this is the background label, ignore it
+    # label 0 is the background
     if label == 0:
         continue
-    
-	# otherwise, construct the label mask and count the number of pixels 
+
     labelMask = np.zeros(thresh.shape, dtype="uint8")
     labelMask[labels == label] = 255
     numPixels = cv2.countNonZero(labelMask)
-	# if the number of pixels in the component is sufficiently large, then add it to our mask of "large blobs"
+
     if numPixels > 300:
         mask = cv2.add(mask, labelMask)
-	
-# find the contours in the mask, then sort them from left to right
+
+# contours of the LEDs, sorted left to right
 cnts = cv2.findContours(mask.copy(), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 cnts = imutils.grab_contours(cnts)
-cnts = contours.sort_contours(cnts)[0]
+if len(cnts) > 0:
+    cnts = contours.sort_contours(cnts)[0]
 
-# Initialize lists to store centroid coordinates and area
-centroid = []
+centroids = []
 areas = []
 
-# Loop over the contours
 for i, c in enumerate(cnts):
-
-    # Calculate the area of the contour
     area = cv2.contourArea(c)
 
-    # Draw the bright spot on the image
     M = cv2.moments(c)
     if M["m00"] != 0:
         cX = (M["m10"] / M["m00"])
@@ -67,23 +63,17 @@ for i, c in enumerate(cnts):
     else:
         cX, cY = 0, 0
 
+    # outline, centre dot and number for each LED
     cv2.drawContours(image, [c], -1, (0, 0, 255), 2)
     cv2.circle(image, (int(cX), int(cY)), 7, (255, 255, 255), -1)
-
     cv2.putText(image, "#{}".format(i + 1), (int(cX) - 20, int(cY) - 20), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-    # Append centroid coordinates and area to the respective lists
-    centroid.append((cX, cY))
-    areas.append(area)
-# Save the output image as a PNG file
-cv2.imwrite("led_detection_results.png", image)
 
-# Open a text file for writing
-with open("led_detection_results.txt", "w") as file:
-    # Write the number of LEDs detected to the file
+    centroids.append((cX, cY))
+    areas.append(area)
+
+cv2.imwrite("LD_3811_led_detection_results.png", image)
+
+with open("LD_3811_led_detection_results.txt", "w") as file:
     file.write(f"No. of LEDs detected: {len(cnts)}\n")
-    # Loop over the contours
-    for i, (centroid, area) in enumerate(zip(centroid, areas)):
-        # Write centroid coordinates and area for each LED to the file
+    for i, (centroid, area) in enumerate(zip(centroids, areas)):
         file.write(f"Centroid #{i + 1}: {centroid}\nArea #{i + 1}: {area}\n")
-# Close the text file
-file.close()
