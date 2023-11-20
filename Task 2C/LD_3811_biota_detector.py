@@ -1,5 +1,14 @@
 #!/usr/bin/env python3
 
+# Team ID:     3811
+# Theme:       Luminosity Drone
+# Filename:    LD_3811_biota_detector.py
+
+# Task 2C: same idea as 2B but there are several LED clusters in the arena.
+# The drone flies a search route, centres over every cluster it sees,
+# publishes it on /astrobiolocation and keeps going. At the end it flies
+# to the research station and lands.
+
 import rospy
 from swift_msgs.msg import *
 from geometry_msgs.msg import PoseArray
@@ -9,7 +18,6 @@ from luminosity_drone.msg import Biolocation
 from sensor_msgs.msg import Image
 import cv2
 import numpy as np
-from imutils import contours
 from skimage import measure
 import imutils
 from cv_bridge import CvBridge, CvBridgeError
@@ -20,26 +28,25 @@ class swift:
         rospy.init_node('drone_control')
         self.drone_position = [0.0,0.0,0.0]
         self.led_detected = False
-        self.led_published = False
-        self.publish = False
         self.final_x = False
         self.final_y = False
-        self.dronehover_detected = False
-        self.published = True
         self.landing = False
         self.moveon = True
         self.reachcenter = False
-        self. i = 0
+
+        # whycon x, y of the clusters already published
+        self.found = []
+
+        # average centroid of the LEDs in the camera image (500x500)
         self.center_x = 0
         self.center_y = 0
-        self.center = [0.0,0.0]
-        self.hover = False
-        self.adjusted_x = 0
-        self.adjusted_y = 0
         self.hover_x = 0
         self.hover_y = 0
+
+        # tolerance for reaching a waypoint, loose while searching
         self.abs_err = 1.5
-        self.organism_type=None
+
+        # search route
         self.setpoints = [
             [-9, -9, 28],
             [-9, -4, 28],
@@ -60,7 +67,9 @@ class swift:
         ]
         self.current_setpoint = 0
 
+        # (number of leds, centroids, areas) from the latest camera frame
         self.led_detection_result = None
+        self.bridge = CvBridge()
 
         self.cmd = swift_msgs()
         self.cmd.rcRoll = 1500
@@ -72,6 +81,7 @@ class swift:
         self.cmd.rcAUX3 = 1500
         self.cmd.rcAUX4 = 1500
 
+        # gains for [roll, pitch, throttle]
         self.Kp = [29,19.5,11.5]
         self.Ki = [0.06,0.08,0.07]
         self.Kd = [281,240,269]
@@ -95,6 +105,9 @@ class swift:
         rospy.Subscriber('/pid_tuning_roll', PidTune, self.roll_set_pid)
         rospy.Subscriber('/swift/camera_rgb/image_raw', Image, self.image_callback)
 
+        # one rate shared by all the loops, 30 Hz
+        self.rate = rospy.Rate(30)
+
         self.arm()
 
     def disarm(self):
@@ -109,14 +122,15 @@ class swift:
         self.cmd.rcPitch = 1500
         self.cmd.rcThrottle = 1000
         self.cmd.rcAUX4 = 1500
-        self.command_pub.publish(self.cmd) # Publishing /drone_command
+        self.command_pub.publish(self.cmd)
         rospy.sleep(1)
 
     def whycon_callback(self, msg):
         self.drone_position[0] = msg.poses[0].position.x
         self.drone_position[1] = msg.poses[0].position.y
         self.drone_position[2] = msg.poses[0].position.z
-                    
+
+    # reset integral and derivative terms when the target changes
     def set_setpoint(self, setpoint):
         self.setpoints[self.current_setpoint] = setpoint
         self.sum_error = [0, 0, 0]
@@ -128,16 +142,23 @@ class swift:
         self.Kd[2] = alt.Kd * 0.3
 
     def pitch_set_pid(self, pitch):
-        self.Kp[0] = pitch.Kp * 0.06
-        self.Ki[0] = pitch.Ki * 0.00008
-        self.Kd[0] = pitch.Kd * 0.3
+        self.Kp[1] = pitch.Kp * 0.06
+        self.Ki[1] = pitch.Ki * 0.00008
+        self.Kd[1] = pitch.Kd * 0.3
 
     def roll_set_pid(self, roll):
-        self.Kp[1] = roll.Kp * 0.06
-        self.Ki[1] = roll.Ki * 0.00008
-        self.Kd[1] = roll.Kd * 0.3
+        self.Kp[0] = roll.Kp * 0.06
+        self.Ki[0] = roll.Ki * 0.00008
+        self.Kd[0] = roll.Kd * 0.3
+
+    def finished(self):
+        return self.current_setpoint >= len(self.setpoints)
 
     def pid(self):
+        # nothing left to fly to after landing
+        if self.finished():
+            return
+
         self.error[0] = -(self.drone_position[0] - self.setpoints[self.current_setpoint][0])
         self.error[1] = self.drone_position[1] - self.setpoints[self.current_setpoint][1]
         self.error[2] = self.drone_position[2] - self.setpoints[self.current_setpoint][2]
@@ -178,6 +199,7 @@ class swift:
         self.pitchError.publish(self.error[1])
         self.throttleError.publish(self.error[2])
 
+    # same steps as Task 1B, returns (number of leds, centroids, areas)
     def detect_leds(self, image):
         gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
         blur = cv2.GaussianBlur(gray, (11, 11), 0)
@@ -204,232 +226,154 @@ class swift:
         centroid = []
         areas = []
 
-        for i, c in enumerate(cnts):
+        for c in cnts:
+            area = cv2.contourArea(c)
 
-                area = cv2.contourArea(c)
+            M = cv2.moments(c)
+            if M["m00"] != 0:
+                cX = (M["m10"] / M["m00"])
+                cY = (M["m01"] / M["m00"])
+            else:
+                cX, cY = 0, 0
 
-                M = cv2.moments(c)
-                if M["m00"] != 0:
-                    cX = (M["m10"] / M["m00"])
-                    cY = (M["m01"] / M["m00"])
-                else:
-                    cX, cY = 0, 0
+            centroid.append([cX, cY])
+            areas.append(area)
 
-                centroid.append([cX, cY])
-                areas.append(area)
-                center = [0.0, 0.0]
-                for sublist in centroid:
-                    for i, value in enumerate(sublist):
-                        center[i] += value
+        # middle of the whole cluster, used for centring the drone
+        if centroid:
+            self.center_x = sum(p[0] for p in centroid) / len(centroid)
+            self.center_y = sum(p[1] for p in centroid) / len(centroid)
 
-                # Calculate the average by dividing the sums by the number of sublists
-                average_values = [total / len(centroid) for total in center]
-                self.center_x = average_values[0]
-                self.center_y = average_values[1]
-                
         return len(cnts), centroid, areas
 
     def image_callback(self, msg):
-        bridge = CvBridge()
-
         try:
-            cv_image = self.convert_image_msg_to_cv(msg)
+            cv_image = self.bridge.imgmsg_to_cv2(msg, desired_encoding='passthrough')
         except CvBridgeError as e:
             print(e)
+            return
 
-        num_leds, centroid_coordinates, areas = self.detect_leds(cv_image)
-        self.led_detection_result = (num_leds, centroid_coordinates, areas)
+        self.led_detection_result = self.detect_leds(cv_image)
 
-    def convert_image_msg_to_cv(self, image_msg):
-        bridge = CvBridge()
-        return bridge.imgmsg_to_cv2(image_msg, desired_encoding='passthrough')
-
+    # organism type from the number of LEDs in the cluster
     def determine_organism_type(self, num_leds):
-
         if num_leds == 2:
-            self.organism_type = "alien_a"
-            return self.organism_type
+            return "alien_a"
         elif num_leds == 3:
-            self.organism_type="alien_b"
-            return self.organism_type
+            return "alien_b"
         elif num_leds == 4:
-            self.organism_type="alien_c"
-            return self.organism_type
-        else:
-            self.organism_type="unknown"
-            return self.organism_type
-        
+            return "alien_c"
+        return "unknown"
+
     def publish_led_detection_results(self):
-        if self.led_published and self.led_detected:
-            num_leds, centroid_coordinates, areas = self.led_detection_result
+        num_leds, centroid_coordinates, areas = self.led_detection_result
 
-            if num_leds > 0 and centroid_coordinates:
-                
-                biolocation_msg = Biolocation()
-                biolocation_msg.organism_type = self.determine_organism_type(num_leds)
-                biolocation_msg.whycon_x = self.drone_position[0]
-                biolocation_msg.whycon_y = self.drone_position[1]
-                biolocation_msg.whycon_z = self.drone_position[2]
+        # the route can pass close to a cluster twice, publish it only once
+        for x, y in self.found:
+            if abs(x - self.drone_position[0]) < 1.5 and abs(y - self.drone_position[1]) < 1.5:
+                print("Already published this one, skipping")
+                return
 
-                self.biolocation_pub.publish(biolocation_msg)
-                self.led_detected = False       
+        if num_leds > 0 and centroid_coordinates:
+            self.found.append((self.drone_position[0], self.drone_position[1]))
+            biolocation_msg = Biolocation()
+            biolocation_msg.organism_type = self.determine_organism_type(num_leds)
+            biolocation_msg.whycon_x = self.drone_position[0]
+            biolocation_msg.whycon_y = self.drone_position[1]
+            biolocation_msg.whycon_z = self.drone_position[2]
 
-                if self.led_published:
-                    self.published = True
+            self.biolocation_pub.publish(biolocation_msg)
+            print(f"Published: Type={biolocation_msg.organism_type}, X={biolocation_msg.whycon_x}, Y={biolocation_msg.whycon_y}")
+
+    # move the setpoint a little towards the side of the image the cluster is on.
+    # x and y are each locked once the cluster centre is within 5 px of the image middle.
+    def step_towards_led(self, z):
+        dx = 0.5 if self.center_x >= 250 else -0.5
+        dy = 0.5 if self.center_y > 250 else -0.5
+
+        self.hover_x = self.drone_position[0] + self.center_x * 0.001
+        self.hover_y = self.drone_position[1] + self.center_y * 0.00079
+        self.set_setpoint([self.hover_x + dx, self.hover_y + dy, z])
+        self.pid()
+
+        if 245 <= self.center_x <= 255:
+            self.final_hover_x = self.drone_position[0]
+            self.final_x = True
+        if 245 <= self.center_y <= 255:
+            self.final_hover_y = self.drone_position[1]
+            self.final_y = True
 
     def center_align(self):
-        while self.reachcenter:
+        while self.reachcenter and not rospy.is_shutdown():
             self.pid()
-            r.sleep()
-            if (self.final_x and self.final_y):
+            self.rate.sleep()
+            if self.final_x and self.final_y:
                 self.reachcenter = False
                 break
-            else:
-                if(250<=self.center_x<=500 and 0<=self.center_y<=250): #1st quadrant
-                    scale_factor_x = 0.001
-                    scale_factor_y = 0.00079
-                    self.adjusted_x = self.center_x * scale_factor_x
-                    self.adjusted_y = self.center_y * scale_factor_y
+            self.step_towards_led(28)
 
-                    self.hover_x = self.drone_position[0] + self.adjusted_x
-                    self.hover_y = self.drone_position[1] + self.adjusted_y
-                    self.set_setpoint([self.hover_x+0.5, self.hover_y-0.5, 28])
-                    self.pid()
-                    if(245<=self.center_x<=255):
-                        self.final_hover_x = self.drone_position[0]
-                        self.final_x = True
-                    elif(245<=self.center_y<=255):
-                        self.final_hover_y = self.drone_position[1]
-                        self.final_y = True
-                elif(0<=self.center_x<=250 and 0<=self.center_y<=250): #2nd quadrant
-                    scale_factor_x = 0.001
-                    scale_factor_y = 0.00079
-                    self.adjusted_x = self.center_x * scale_factor_x
-                    self.adjusted_y = self.center_y * scale_factor_y
-
-                    self.hover_x = self.drone_position[0] + self.adjusted_x
-                    self.hover_y = self.drone_position[1] + self.adjusted_y
-                    self.set_setpoint([self.hover_x-0.5, self.hover_y-0.5, 28])
-                    self.pid()
-                    if(245<=self.center_x<=255):
-                        self.final_hover_x = self.drone_position[0]
-                        self.final_x = True
-                    elif(245<=self.center_y<=255):
-                        self.final_hover_y = self.drone_position[1]
-                        self.final_y = True
-                elif(0<=self.center_x<=250 and 250<=self.center_y<=500): #3rd quadrant
-                    scale_factor_x = 0.001
-                    scale_factor_y = 0.00079
-                    self.adjusted_x = self.center_x * scale_factor_x
-                    self.adjusted_y = self.center_y * scale_factor_y
-
-                    self.hover_x = self.drone_position[0] + self.adjusted_x
-                    self.hover_y = self.drone_position[1] + self.adjusted_y
-                    self.set_setpoint([self.hover_x-0.5, self.hover_y+0.5, 28])
-                    self.pid()
-                    if(245<=self.center_x<=255):
-                        self.final_hover_x = self.drone_position[0]
-                        self.final_x = True
-                    elif(245<=self.center_y<=255):
-                        self.final_hover_y = self.drone_position[1]
-                        self.final_y = True
-                elif(250<=self.center_x<=500 and 250<=self.center_y<=500): #4th quadrant
-                    scale_factor_x = 0.001
-                    scale_factor_y = 0.00079
-                    self.adjusted_x = self.center_x * scale_factor_x
-                    self.adjusted_y = self.center_y * scale_factor_y
-
-                    self.hover_x = self.drone_position[0] + self.adjusted_x
-                    self.hover_y = self.drone_position[1] + self.adjusted_y
-                    self.set_setpoint([self.hover_x+0.5, self.hover_y+0.5, 28])
-                    self.pid()
-                    if(245<=self.center_x<=255):
-                        self.final_hover_x = self.drone_position[0]
-                        self.final_x = True
-                    elif(245<=self.center_y<=255):
-                        self.final_hover_y = self.drone_position[1]
-                        self.final_y = True
-        
     def run(self):
-        # self.led_detected=False
-        if not self.led_detected and (self.current_setpoint < len(self.setpoints)):
+        # no camera frame yet
+        if self.led_detection_result is None:
+            return
+
+        if not self.led_detected and not self.finished():
             num_leds, centroid_coordinates, _ = self.led_detection_result
-            if num_leds>0 and centroid_coordinates:#cnmeter_x centery y
+            if num_leds > 0 and centroid_coordinates:
                 self.led_detected = True
                 self.reachcenter = True
                 self.moveon = False
                 self.center_align()
-                if (self.final_x and self.final_y):
+                if self.final_x and self.final_y:
                     self.set_setpoint([self.final_hover_x, self.final_hover_y, 28])
                     self.pid()
-                    self.adjusted_x = 0
-                    self.adjusted_y = 0
-                    self.final_hover_x = 0
-                    self.final_hover_y = 0
                     self.final_x = False
                     self.final_y = False
-                    self.organism_type=None
-                    self.led_published = True 
                     self.publish_led_detection_results()
-                    self.led_published = False
+                    self.led_detected = False
                     self.moveon = True
-                
-            while self.moveon:
+
+            # carry on with the route while the last cluster is still in view
+            # so the same one is not picked up twice
+            while self.moveon and not rospy.is_shutdown():
                 num_leds, centroid_coordinates, _ = self.led_detection_result
                 self.pid()
-                r.sleep()
+                self.rate.sleep()
                 self.run_next_setpoint()
-                if self.published  and num_leds==4:
-                    self.run_next_setpoint()
-                elif self.published and num_leds==3:
-                    self.run_next_setpoint()
-                elif self.published and num_leds==2:
+                if 2 <= num_leds <= 4:
                     self.run_next_setpoint()
 
-                if not self.published:
-                    break
-                elif num_leds==0 and num_leds!=4 and num_leds!=3 and num_leds!=2 and self.published:
+                if num_leds == 0 or self.finished():
                     break
 
     def run_next_setpoint(self):
-        if self.current_setpoint < len(self.setpoints) and not self.landing:
-            setpoint = self.setpoints[self.current_setpoint]
-            error = [setpoint[0] - self.drone_position[0], setpoint[1] - self.drone_position[1], setpoint[2] - self.drone_position[2]]
+        if self.finished():
+            return
 
+        setpoint = self.setpoints[self.current_setpoint]
+        error = [setpoint[0] - self.drone_position[0], setpoint[1] - self.drone_position[1], setpoint[2] - self.drone_position[2]]
+
+        if not self.landing:
             if all(abs(e) <= self.abs_err for e in error):
-                # Waypoint is considered successful
-                self.current_setpoint += 1
-                if self.current_setpoint < len(self.setpoints) and not self.landing:
-                    # Move to the next setpoint
-
-                    self.set_setpoint(self.setpoints[self.current_setpoint])
-                    self.pid()
-
-                else:
-                    self.landing = True
-                    # self.setpoints.append([10, 10, 30])
-                    self.setpoints.append([11, 11, 37])
-
-        else:
-            self.abs_err = 0.1
-            setpoint = self.setpoints[self.current_setpoint]
-            error = [setpoint[0] - self.drone_position[0], setpoint[1] - self.drone_position[1], setpoint[2] - self.drone_position[2]]
-
-            if all(abs(e) <= self.abs_err for e in error):
-                # Waypoint is considered successful
                 self.current_setpoint += 1
                 if self.current_setpoint < len(self.setpoints):
                     self.set_setpoint(self.setpoints[self.current_setpoint])
-
+                    self.pid()
                 else:
-                    self.cmd.rcAUX4 = 1100
-                    self.command_pub.publish(self.cmd)
+                    # search done, go to the research station
+                    self.landing = True
+                    self.setpoints.append([11, 11, 37])
+        else:
+            self.abs_err = 0.1
+            if all(abs(e) <= self.abs_err for e in error):
+                self.current_setpoint += 1
+                if self.current_setpoint < len(self.setpoints):
+                    self.set_setpoint(self.setpoints[self.current_setpoint])
+                else:
                     self.disarm()
 
 if __name__ == '__main__':
-
     swift_drone = swift()
-    r = rospy.Rate(30)
     while not rospy.is_shutdown():
         swift_drone.run()
-        r.sleep()
+        swift_drone.rate.sleep()
