@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+
+# rosbag writes this while recording
+*.bag.active
+
+# input image for Task 1B
+led.jpg

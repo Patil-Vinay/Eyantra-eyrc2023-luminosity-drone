@@ -1,0 +1,3 @@
+# opencv and cv_bridge come with ROS Noetic
+imutils==0.5.4
+scikit-image==0.21.0
