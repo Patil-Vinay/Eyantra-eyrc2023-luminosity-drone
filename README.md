@@ -5,6 +5,7 @@ Our code for the Luminosity Drone theme of the e-Yantra Robotics Competition 202
 In this theme a small drone (the Swift drone) flies over an arena in Gazebo, finds groups of glowing LEDs
 ("alien life forms") with its downward camera, works out what type each one is from the number of LEDs
 and reports where it is. The drone position comes from a whycon marker seen by an overhead camera.
+Tasks 0 to 2 are in simulation. Task 4 uses the real drone camera and LED boards we made.
 
 ## Tasks
 
@@ -16,6 +17,8 @@ and reports where it is. The drone position comes from a whycon marker seen by a
 | Task 2A | `LD_3811_waypoint_navigation.py` | Flies through 10 fixed waypoints, each reached within 0.2 in x, y and z |
 | Task 2B | `LD_3811_life_form_detector.py` | Searches the arena for one LED cluster, reports it and lands |
 | Task 2C | `LD_3811_biota_detector.py` | Same as 2B but for several clusters in one flight |
+| Task 4B | `LD_3811_led_detection.py` | Finds LED clusters in a real camera image and writes each cluster's type and centroid |
+| Task 4C | photos | Our LED cluster boards seen by a phone and by the drone camera, plus the 4B output |
 
 The `.bag` files are rosbag recordings of our runs that were submitted for evaluation. All of them
 have `/whycon/poses`. The 2B and 2C bags also have the `/astrobiolocation` messages (1 in 2B, 3 in 2C).
@@ -45,6 +48,20 @@ search it flies to the research station at (11, 11) and disarms.
 The centring code assumes a 500x500 camera image and the scale factors were picked by trial in the
 simulator, so they will need changing for a different camera or height.
 
+**Clusters in a real image (4B).** The real camera image has a pink glow around every LED and two LEDs
+close together can touch. So the threshold is set high (225) to keep only the white centre of each LED
+and blobs that are not round are dropped (this also removes things like a window bar in a screenshot).
+LEDs closer than 100 pixels to any LED of a cluster join that cluster. The type comes from the LED count,
+same as before with 5 LEDs = `alien_d`. The 100 pixel gap suits our photo and can be changed with `--dist`.
+
+The LED boards we made (Task 4C):
+
+<img src="Task%204C/LD_3811_ledcluster_mobile.jpg" width="500">
+
+The same boards from the drone camera and the 4B output on it:
+
+<img src="Task%204C/LD_3811_ledcluster_drone.jpg" width="400"> <img src="Task%204C/LD_3811_ledcluster_drone_results.png" width="400">
+
 ## Running
 
 You need Ubuntu 20.04 with ROS Noetic and Gazebo 11 and the Luminosity Drone workspace from e-Yantra,
@@ -71,6 +88,14 @@ python3 LD_3811_led_detection.py led.jpg
 
 It writes `LD_3811_led_detection_results.png` and `LD_3811_led_detection_results.txt` in the current
 folder. The result files in the repo are from our run on the task image.
+
+Task 4B also runs without ROS:
+
+```bash
+python3 "Task 4B/LD_3811_led_detection.py" --image "Task 4C/LD_3811_ledcluster_drone.jpg"
+```
+
+It writes `LD_3811_ledcluster_drone_results.png` and `LD_3811_ledcluster_drone.txt` next to the image.
 
 ## Videos
 
